@@ -131,63 +131,63 @@ def generate_qa_pairs_with_local_model(
         # Generate multiple QA pairs for this chunk
         for pair_idx in range(num_pairs_per_chunk):
             print(f"  Generating QA pair {pair_idx+1}/{num_pairs_per_chunk}...")
-        
-        # Create prompt for QA generation
-        prompt = get_longtext_proposer_prompt(
-            text_segment=chunk_text,
-        )
-        
-        try:
-            # Tokenize
-            messages = [{"role": "user", "content": prompt}]
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
+            
+            # Create prompt for QA generation
+            prompt = get_longtext_proposer_prompt(
+                text_segment=chunk_text,
             )
-            model_inputs = tokenizer([text], return_tensors="pt")
             
-            # Move to specified device
-            if device != "auto":
-                model_inputs = model_inputs.to(device)
-            
-            # Generate
-            with torch.no_grad():
-                generated_ids = model.generate(
-                    model_inputs.input_ids,
-                    max_new_tokens=max_tokens,
-                    temperature=temperature,
-                    do_sample=True,
-                    top_p=0.95,
-                    pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
+            try:
+                # Tokenize
+                messages = [{"role": "user", "content": prompt}]
+                text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True
                 )
-            
-            # Decode
-            generated_ids = [
-                output_ids[len(input_ids):] 
-                for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-            ]
-            generated_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            
-            # Extract QA pair
-            qa_pair = extract_qa_pair(generated_text)
-            
-            if qa_pair['extraction_success']:
-                qa_pair['chunk_id'] = chunk_id
+                model_inputs = tokenizer([text], return_tensors="pt")
+                
+                # Move to specified device
+                if device != "auto":
+                    model_inputs = model_inputs.to(device)
+                
+                # Generate
+                with torch.no_grad():
+                    generated_ids = model.generate(
+                        model_inputs.input_ids,
+                        max_new_tokens=max_tokens,
+                        temperature=temperature,
+                        do_sample=True,
+                        top_p=0.95,
+                        pad_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                    )
+                
+                # Decode
+                generated_ids = [
+                    output_ids[len(input_ids):] 
+                    for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+                ]
+                generated_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                
+                # Extract QA pair
+                qa_pair = extract_qa_pair(generated_text)
+                
+                if qa_pair['extraction_success']:
+                    qa_pair['chunk_id'] = chunk_id
                     qa_pair['pair_idx'] = pair_idx
-                qa_pair['source_chunk'] = chunk_text[:200] + "..."  # Store snippet
-                all_qa_pairs.append(qa_pair)
+                    qa_pair['source_chunk'] = chunk_text[:200] + "..."  # Store snippet
+                    all_qa_pairs.append(qa_pair)
                     print(f"    ✓ Generated QA pair {pair_idx+1} successfully")
-            else:
+                else:
                     print(f"    ✗ Failed to extract QA pair {pair_idx+1} from response")
                     print(f"    Generated text: {generated_text[:200]}...")
-                
-        except Exception as e:
+                    
+            except Exception as e:
                 print(f"    ✗ Error generating QA pair {pair_idx+1}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
+                import traceback
+                traceback.print_exc()
+                continue
     
     print(f"\n[INFO] Generated {len(all_qa_pairs)} valid QA pairs total")
     
@@ -242,39 +242,39 @@ def generate_qa_pairs_with_llm(
         # Generate multiple QA pairs for this chunk
         for pair_idx in range(num_pairs_per_chunk):
             print(f"  Generating QA pair {pair_idx+1}/{num_pairs_per_chunk}...")
-        
-        # Create prompt for QA generation
-        prompt = get_longtext_proposer_prompt(
-            text_segment=chunk_text,
-        )
-        
-        try:
-            # Generate QA pairs
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                top_p=0.95,
+            
+            # Create prompt for QA generation
+            prompt = get_longtext_proposer_prompt(
+                text_segment=chunk_text,
             )
             
-            generated_text = response.choices[0].message.content
-            
-            # Extract QA pair
-            qa_pair = extract_qa_pair(generated_text)
-            
-            if qa_pair['extraction_success']:
-                qa_pair['chunk_id'] = chunk_id
-                    qa_pair['pair_idx'] = pair_idx
-                qa_pair['source_chunk'] = chunk_text[:200] + "..."  # Store snippet
-                all_qa_pairs.append(qa_pair)
-                    print(f"    ✓ Generated QA pair {pair_idx+1} successfully")
-            else:
-                    print(f"    ✗ Failed to extract QA pair {pair_idx+1} from response")
+            try:
+                # Generate QA pairs
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=0.95,
+                )
                 
-        except Exception as e:
+                generated_text = response.choices[0].message.content
+                
+                # Extract QA pair
+                qa_pair = extract_qa_pair(generated_text)
+                
+                if qa_pair['extraction_success']:
+                    qa_pair['chunk_id'] = chunk_id
+                    qa_pair['pair_idx'] = pair_idx
+                    qa_pair['source_chunk'] = chunk_text[:200] + "..."  # Store snippet
+                    all_qa_pairs.append(qa_pair)
+                    print(f"    ✓ Generated QA pair {pair_idx+1} successfully")
+                else:
+                    print(f"    ✗ Failed to extract QA pair {pair_idx+1} from response")
+                    
+            except Exception as e:
                 print(f"    ✗ Error generating QA pair {pair_idx+1}: {e}")
-            continue
+                continue
     
     print(f"\n[INFO] Generated {len(all_qa_pairs)} valid QA pairs total")
     return all_qa_pairs
@@ -561,14 +561,14 @@ def main():
     is_distributed = 'LOCAL_RANK' in os.environ
     
     if is_main_process:
-    print("\n" + "="*80)
-    print("Long-Text SFT Warmup Script")
-    print("="*80 + "\n")
+        print("\n" + "="*80)
+        print("Long-Text SFT Warmup Script")
+        print("="*80 + "\n")
     
     # Output paths
     warmup_data_dir = Path(args.output_dir) / "warmup_data"
     if is_main_process:
-    warmup_data_dir.mkdir(parents=True, exist_ok=True)
+        warmup_data_dir.mkdir(parents=True, exist_ok=True)
     
     dataset_path = warmup_data_dir / "longtext_warmup.parquet"
     
@@ -578,41 +578,41 @@ def main():
     
     # Only main process generates the dataset
     if is_main_process:
-    # Load tokenizer
-    print("Loading tokenizer...")
+        # Load tokenizer
+        print("Loading tokenizer...")
         tokenizer = hf_tokenizer(args.model_path, trust_remote_code=True)
         print(f"  Tokenizer loaded: {args.model_path}")
-    print()
-    
-    # Create SFT dataset from long text
+        print()
+        
+        # Create SFT dataset from long text
         if not dataset_path.exists() or args.force_regenerate:
             if args.force_regenerate and dataset_path.exists():
                 print(f"Force regenerating dataset (existing file will be overwritten)...")
                 # Remove old marker file
                 if dataset_ready_marker.exists():
                     dataset_ready_marker.unlink()
-        print("Creating SFT warmup dataset...")
+            print("Creating SFT warmup dataset...")
             print("[INFO] Running on main process (rank 0) only for dataset generation")
-        create_sft_dataset_from_longtext(
+            create_sft_dataset_from_longtext(
                 long_text_path=args.long_text_path,
-            output_path=str(dataset_path),
+                output_path=str(dataset_path),
                 chunk_size=args.chunk_size,
                 overlap=args.overlap,
                 num_pairs_per_chunk=args.num_pairs_per_chunk,
                 generation_model=args.generation_model,
                 temperature=args.temperature,
-            tokenizer=tokenizer,
+                tokenizer=tokenizer,
                 api_key=args.api_key,
                 use_local_model=args.use_local_model,
                 local_model_path=args.model_path if args.use_local_model else None,
                 local_model_device=args.local_model_device,
-        )
-    else:
-        print(f"Using existing warmup dataset: {dataset_path}")
-        df = pd.read_parquet(dataset_path)
-        print(f"  Dataset size: {len(df)} examples")
-        print()
-    
+            )
+        else:
+            print(f"Using existing warmup dataset: {dataset_path}")
+            df = pd.read_parquet(dataset_path)
+            print(f"  Dataset size: {len(df)} examples")
+            print()
+        
         # Main process: create marker file after dataset is ready
         dataset_ready_marker.touch()
     
@@ -664,24 +664,24 @@ def main():
         print("="*80)
         print(OmegaConf.to_yaml(config))
         print("="*80 + "\n")
-    
-    # Run SFT training
-    print("\n" + "="*80)
-    print("Starting SFT Training")
-    print("="*80 + "\n")
+        
+        # Run SFT training
+        print("\n" + "="*80)
+        print("Starting SFT Training")
+        print("="*80 + "\n")
     
     try:
         run_sft(config)
         if is_main_process:
-        print("\n" + "="*80)
-        print("SFT Warmup Completed Successfully!")
+            print("\n" + "="*80)
+            print("SFT Warmup Completed Successfully!")
             print(f"Checkpoints saved to: {args.output_dir}")
-        print("="*80 + "\n")
+            print("="*80 + "\n")
     except Exception as e:
         if is_main_process:
-        print(f"\n[ERROR] SFT training failed: {e}")
-        import traceback
-        traceback.print_exc()
+            print(f"\n[ERROR] SFT training failed: {e}")
+            import traceback
+            traceback.print_exc()
         raise
 
 

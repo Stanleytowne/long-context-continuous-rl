@@ -20,7 +20,7 @@ set -e
 
 # Default parameters
 LONG_TEXT_PATH="${1:-data/sample_document.txt}"
-MODEL_PATH="${2:-Qwen/Qwen2.5-7B}"
+MODEL_PATH="${2:-/data/models/Qwen2.5-3B-Instruct}"
 OUTPUT_DIR="${3:-./outputs/longtext_warmup}"
 NUM_GPUS="${4:-4}"
 
