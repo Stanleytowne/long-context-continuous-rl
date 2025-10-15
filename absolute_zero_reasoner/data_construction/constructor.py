@@ -497,3 +497,486 @@ def get_pred_code_io_data(
     df = pd.DataFrame(return_io_data)
     df.to_parquet(output_path)
 
+
+"""
+Long-Text Continuous Learning Data Construction
+"""
+
+def chunk_long_text(
+    text: str,
+    chunk_size: int = 2048,
+    overlap: int = 256,
+    tokenizer = None,
+) -> List[Dict[str, any]]:
+    """
+    Split long text into overlapping chunks for processing.
+    
+    Args:
+        text: The long text to be chunked
+        chunk_size: Maximum number of tokens per chunk
+        overlap: Number of overlapping tokens between consecutive chunks
+        tokenizer: Tokenizer to count tokens (if None, use character approximation)
+    
+    Returns:
+        List of dictionaries containing chunk info:
+        - 'text': chunk text
+        - 'start_idx': start position in original text
+        - 'end_idx': end position in original text
+        - 'chunk_id': sequential chunk identifier
+    """
+    chunks = []
+    
+    # If no tokenizer, use character-based approximation (4 chars ≈ 1 token)
+    if tokenizer is None:
+        char_per_token = 4
+        chunk_size_chars = chunk_size * char_per_token
+        overlap_chars = overlap * char_per_token
+        
+        start = 0
+        chunk_id = 0
+        while start < len(text):
+            end = min(start + chunk_size_chars, len(text))
+            chunk_text = text[start:end]
+            
+            chunks.append({
+                'text': chunk_text,
+                'start_idx': start,
+                'end_idx': end,
+                'chunk_id': chunk_id,
+                'token_count': len(chunk_text) // char_per_token,
+            })
+            
+            chunk_id += 1
+            start += chunk_size_chars - overlap_chars
+            
+            if start >= len(text):
+                break
+    else:
+        # Use tokenizer for accurate chunking
+        tokens = tokenizer.encode(text)
+        start_token = 0
+        chunk_id = 0
+        
+        while start_token < len(tokens):
+            end_token = min(start_token + chunk_size, len(tokens))
+            chunk_tokens = tokens[start_token:end_token]
+            chunk_text = tokenizer.decode(chunk_tokens, skip_special_tokens=True)
+            
+            chunks.append({
+                'text': chunk_text,
+                'start_token_idx': start_token,
+                'end_token_idx': end_token,
+                'chunk_id': chunk_id,
+                'token_count': len(chunk_tokens),
+            })
+            
+            chunk_id += 1
+            start_token += chunk_size - overlap
+            
+            if start_token >= len(tokens):
+                break
+    
+    print(f"[INFO] Chunked long text into {len(chunks)} chunks")
+    return chunks
+
+
+def extract_qa_pair(text: str) -> Dict[str, str]:
+    """
+    Extract question and answer from model-generated text.
+    Expected format: <question>...</question><answer>...</answer>
+    
+    Args:
+        text: Model-generated text containing question and answer tags
+    
+    Returns:
+        Dictionary with 'question' and 'answer' keys, or None if extraction fails
+    """
+    import re
+    
+    # Try to extract question
+    question_match = re.search(r'<question>(.*?)</question>', text, re.DOTALL | re.IGNORECASE)
+    if question_match:
+        question = question_match.group(1).strip()
+    else:
+        # Fallback: look for alternative markers
+        question = None
+    
+    # Try to extract answer
+    answer_match = re.search(r'<answer>(.*?)</answer>', text, re.DOTALL | re.IGNORECASE)
+    if answer_match:
+        answer = answer_match.group(1).strip()
+    else:
+        # Fallback: look for alternative markers
+        answer = None
+    
+    if question and answer:
+        return {
+            'question': question,
+            'answer': answer,
+            'extraction_success': True
+        }
+    else:
+        # If tags not found, try to infer from structure
+        # This is a fallback for robustness
+        return {
+            'question': text[:len(text)//2].strip() if not question else question,
+            'answer': text[len(text)//2:].strip() if not answer else answer,
+            'extraction_success': False
+        }
+
+
+def get_gen_longtext_qa_data(
+    long_text: str,
+    target_data_len: int,
+    content_max_length: int,
+    output_path: str,
+    split: str,
+    tokenizer,
+    chunk_size: int = 2048,
+    overlap: int = 256,
+    use_chunking: bool = True,
+    chunk_sampling_strategy: str = 'random',  # 'random', 'sequential', 'weighted'
+    reference_qa_pairs: List[Dict] = None,
+    include_references: float = 0.5,
+    weights: List[float] = None,
+    prompt_manager = None,
+):
+    """
+    Generate question-answer pairs from long text for the Proposer phase.
+    The model sees the text and generates QA pairs that require text knowledge.
+    
+    Args:
+        long_text: The source long text to learn from
+        target_data_len: Number of QA pairs to generate
+        content_max_length: Maximum token length for prompts
+        output_path: Path to save the generated parquet file
+        split: Data split identifier ('train', 'val', 'test')
+        tokenizer: Tokenizer for text processing
+        chunk_size: Size of text chunks in tokens
+        overlap: Overlap between chunks in tokens
+        use_chunking: Whether to chunk the text (True for long texts)
+        chunk_sampling_strategy: How to sample chunks
+        reference_qa_pairs: Optional existing QA pairs for reference
+        include_references: Probability of including reference QA pairs (0.0-1.0)
+        weights: Optional sampling weights for chunks
+        prompt_manager: Optional prompt manager for dynamic prompts
+    
+    Returns:
+        None (saves data to parquet file)
+    """
+    from absolute_zero_reasoner.data_construction.prompts import (
+        get_longtext_proposer_prompt,
+        get_longtext_proposer_with_reference_prompt
+    )
+    from absolute_zero_reasoner.utils.logging_utils.stdout import PrettyPrinter
+    
+    return_io_data = []
+    
+    # Chunk the text if needed
+    if use_chunking:
+        chunks = chunk_long_text(long_text, chunk_size, overlap, tokenizer)
+    else:
+        chunks = [{'text': long_text, 'chunk_id': 0, 'token_count': len(tokenizer.encode(long_text))}]
+    
+    # Initialize sampling probabilities
+    if weights is None or len(weights) != len(chunks):
+        probabilities = np.full(len(chunks), 1.0 / len(chunks))
+    else:
+        w = np.asarray(weights, dtype=float)
+        s = w.sum()
+        if s <= 0 or not np.isfinite(s):
+            probabilities = np.full(len(chunks), 1.0 / len(chunks))
+        else:
+            probabilities = w / s
+    
+    # Parse include_references probability
+    try:
+        if isinstance(include_references, bool):
+            p_include = 1.0 if include_references else 0.0
+        else:
+            p_include = float(include_references)
+        p_include = max(0.0, min(1.0, p_include))
+    except Exception:
+        p_include = 0.5
+    
+    print(f"[DEBUG] get_gen_longtext_qa_data: include_references probability = {p_include}")
+    print(f"[DEBUG] Processing {len(chunks)} text chunks")
+    
+    idx = 0
+    chunk_idx = 0
+    max_attempts = max(5 * target_data_len, 100)
+    attempts = 0
+    
+    while len(return_io_data) < target_data_len and attempts < max_attempts:
+        attempts += 1
+        
+        # Sample a chunk based on strategy
+        if chunk_sampling_strategy == 'random':
+            chunk = chunks[np.random.choice(len(chunks), p=probabilities)]
+        elif chunk_sampling_strategy == 'sequential':
+            chunk = chunks[chunk_idx % len(chunks)]
+            chunk_idx += 1
+        else:  # weighted
+            chunk = chunks[np.random.choice(len(chunks), p=probabilities)]
+        
+        # Decide whether to include reference QA pairs
+        include_refs_this_round = (np.random.rand() < p_include) and (reference_qa_pairs is not None) and (len(reference_qa_pairs) > 0)
+        
+        # Build the prompt
+        if prompt_manager:
+            if include_refs_this_round:
+                instruction_template = prompt_manager.get_proposer_instruction(ref=True, with_answer_generation=True)
+            else:
+                instruction_template = prompt_manager.get_proposer_instruction(ref=False, with_answer_generation=True)
+        else:
+            instruction_template = '{}'
+        
+        # Select reference QA pairs if needed
+        if include_refs_this_round:
+            k = min(3, len(reference_qa_pairs))  # Up to 3 reference QA pairs
+            chosen_refs = np.random.choice(reference_qa_pairs, size=k, replace=False)
+            if prompt_manager:
+                io_prompt = instruction_template + "\n\n" + get_longtext_proposer_with_reference_prompt(
+                    text_segment=chunk['text'],
+                    reference_qa_pairs=chosen_refs
+                )
+            else:
+                io_prompt = instruction_template.format(
+                    get_longtext_proposer_with_reference_prompt(
+                        text_segment=chunk['text'],
+                        reference_qa_pairs=chosen_refs
+                    )
+                )
+        else:
+            if prompt_manager:
+                io_prompt = instruction_template + "\n\n" + get_longtext_proposer_prompt(
+                    text_segment=chunk['text']
+                )
+            else:
+                io_prompt = instruction_template.format(
+                    get_longtext_proposer_prompt(text_segment=chunk['text'])
+                )
+        
+        # Log prompt for debugging
+        PrettyPrinter.section_header(f"🤖 Gen_LongText Proposer Prompt (Item {idx+1})")
+        PrettyPrinter.code_block(f"Text segment (first 200 chars): {chunk['text'][:200]}...")
+        print(f"[GEN_LONGTEXT_LOG] Prompt length: {len(tokenizer(io_prompt)['input_ids'])} tokens")
+        print(f"[GEN_LONGTEXT_LOG] Chunk ID: {chunk['chunk_id']}, Chunk tokens: {chunk['token_count']}")
+        
+        # Filter out prompts that are too long
+        if len(tokenizer(io_prompt)['input_ids']) <= content_max_length:
+            io_item = {
+                "data_source": 'gen_longtext_qa',
+                "prompt": [{"role": "user", "content": io_prompt}],
+                "text_segment": chunk['text'],
+                "chunk_id": chunk['chunk_id'],
+                "question": "",  # To be filled by model
+                "answer": "",    # To be filled by model
+                "ability": "longtext_qa",
+                "reward_model": {
+                    "style": "rule",
+                    "ground_truth": '',
+                },
+                "extra_info": {
+                    'split': split,
+                    'index': idx,
+                    'metric': 'gen_longtext_qa',
+                    'chunk_id': chunk['chunk_id'],
+                    'chunk_token_count': chunk['token_count'],
+                    'has_references': include_refs_this_round,
+                }
+            }
+            return_io_data.append(io_item)
+            idx += 1
+    
+    # Upsample if not enough data
+    while len(return_io_data) < target_data_len:
+        io_item = return_io_data[np.random.randint(0, len(return_io_data))]
+        return_io_data.append(io_item)
+    
+    # Save to parquet
+    pd.DataFrame(return_io_data).to_parquet(output_path)
+    print(f"[INFO] Saved {len(return_io_data)} gen_longtext_qa items to {output_path}")
+
+
+def get_pred_longtext_qa_data(
+    qa_pairs: List[Dict],
+    target_data_len: int,
+    content_max_length: int,
+    output_path: str,
+    split: str,
+    tokenizer,
+    prompt_manager = None,
+):
+    """
+    Generate prediction tasks from QA pairs for the Solver phase.
+    The model does NOT see the text and must answer based on learned knowledge.
+    
+    Args:
+        qa_pairs: List of question-answer pairs generated by proposer
+        target_data_len: Number of prediction tasks to create
+        content_max_length: Maximum token length for prompts
+        output_path: Path to save the generated parquet file
+        split: Data split identifier
+        tokenizer: Tokenizer for text processing
+        prompt_manager: Optional prompt manager for dynamic prompts
+    
+    Returns:
+        None (saves data to parquet file)
+    """
+    from absolute_zero_reasoner.data_construction.prompts import get_longtext_solver_prompt
+    
+    return_io_data = []
+    
+    # Use dynamic prompt if prompt_manager is available
+    if prompt_manager:
+        instruction_template = prompt_manager.get_solver_instruction("{}")
+        print(f"[DEBUG] get_pred_longtext_qa_data: Using dynamic solver instruction")
+    else:
+        instruction_template = '{}'
+        print(f"[DEBUG] get_pred_longtext_qa_data: Using default instruction template")
+    
+    for idx, qa_pair in enumerate(qa_pairs):
+        question = qa_pair.get('question', '')
+        ground_truth_answer = qa_pair.get('answer', '')
+        
+        if not question:
+            continue
+        
+        # Build the prompt (question only, no text)
+        if prompt_manager:
+            io_prompt = prompt_manager.get_solver_instruction(question)
+        else:
+            io_prompt = instruction_template.format(
+                get_longtext_solver_prompt(question=question)
+            )
+        
+        # Filter out prompts that are too long
+        if len(tokenizer(io_prompt)['input_ids']) <= content_max_length:
+            output_io_item = {
+                "data_source": 'pred_longtext_qa',
+                "prompt": [{
+                    "role": "user",
+                    "content": io_prompt,
+                }],
+                "question": question,
+                "answer": "",  # To be filled by model
+                "ability": "longtext_qa",
+                "reward_model": {
+                    "style": "llm_judge",
+                    "ground_truth": ground_truth_answer,
+                },
+                "extra_info": {
+                    'split': split,
+                    'index': idx,
+                    'metric': 'pred_longtext_qa',
+                    'original_chunk_id': qa_pair.get('chunk_id', -1),
+                }
+            }
+            return_io_data.append(output_io_item)
+        
+        if len(return_io_data) >= target_data_len:
+            break
+    
+    # Upsample if not enough data
+    while len(return_io_data) < target_data_len and len(return_io_data) > 0:
+        io_item = return_io_data[random.randint(0, len(return_io_data))]
+        return_io_data.append(io_item)
+    
+    # Save to parquet
+    df = pd.DataFrame(return_io_data)
+    df.to_parquet(output_path)
+    print(f"[INFO] Saved {len(return_io_data)} pred_longtext_qa items to {output_path}")
+
+
+def get_judge_longtext_qa_data(
+    qa_pairs_with_answers: List[Dict],
+    target_data_len: int,
+    content_max_length: int,
+    output_path: str,
+    split: str,
+    tokenizer,
+    prompt_manager = None,
+):
+    """
+    Generate judge evaluation tasks for the Judge phase.
+    The model compares solver's answer with ground truth.
+    
+    Args:
+        qa_pairs_with_answers: List of QA pairs with both ground truth and solver's answers
+        target_data_len: Number of judge tasks to create
+        content_max_length: Maximum token length for prompts
+        output_path: Path to save the generated parquet file
+        split: Data split identifier
+        tokenizer: Tokenizer for text processing
+        prompt_manager: Optional prompt manager for dynamic prompts
+    
+    Returns:
+        None (saves data to parquet file)
+    """
+    from absolute_zero_reasoner.data_construction.prompts import get_longtext_judge_prompt
+    
+    return_io_data = []
+    instruction_template = '{}'
+    
+    for idx, item in enumerate(qa_pairs_with_answers):
+        question = item.get('question', '')
+        ground_truth = item.get('ground_truth_answer', '')
+        generated_answer = item.get('generated_answer', '')
+        
+        if not question or not ground_truth:
+            continue
+        
+        # Build the judge prompt
+        if prompt_manager:
+            io_prompt = get_longtext_judge_prompt(
+                question=question,
+                ground_truth=ground_truth,
+                generated_answer=generated_answer,
+                prompt_manager=prompt_manager,
+            )
+        else:
+            io_prompt = instruction_template.format(
+                get_longtext_judge_prompt(
+                    question=question,
+                    ground_truth=ground_truth,
+                    generated_answer=generated_answer,
+                )
+            )
+        
+        # Filter out prompts that are too long
+        if len(tokenizer(io_prompt)['input_ids']) <= content_max_length:
+            output_io_item = {
+                "data_source": 'judge_longtext_qa',
+                "prompt": [{
+                    "role": "user",
+                    "content": io_prompt,
+                }],
+                "question": question,
+                "ground_truth_answer": ground_truth,
+                "generated_answer": generated_answer,
+                "ability": "longtext_qa",
+                "reward_model": {
+                    "style": "format",
+                    "ground_truth": '',  # Judge just needs to produce a valid score
+                },
+                "extra_info": {
+                    'split': split,
+                    'index': idx,
+                    'metric': 'judge_longtext_qa',
+                }
+            }
+            return_io_data.append(output_io_item)
+        
+        if len(return_io_data) >= target_data_len:
+            break
+    
+    # Upsample if not enough data
+    while len(return_io_data) < target_data_len and len(return_io_data) > 0:
+        io_item = return_io_data[random.randint(0, len(return_io_data))]
+        return_io_data.append(io_item)
+    
+    # Save to parquet
+    df = pd.DataFrame(return_io_data)
+    df.to_parquet(output_path)
+    print(f"[INFO] Saved {len(return_io_data)} judge_longtext_qa items to {output_path}")

@@ -28,7 +28,9 @@ from verl.utils import hf_tokenizer
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
 from absolute_zero_reasoner.trainer.ppo.azr_ray_trainer import CodeIORayPPOTrainer, GeneralIORayPPOTrainer
+from absolute_zero_reasoner.trainer.ppo.longtext_ray_trainer import LongTextQARayPPOTrainer
 from absolute_zero_reasoner.rewards.reward_managers import CodeIORewardManager, GeneralIORewardManager, BenchmarkEvaluationRewardManager
+from absolute_zero_reasoner.rewards.longtext_reward_manager import LongTextQARewardManager
 
 
 def load_api_keys(api_file_path: str = "api.json") -> List[str]:
@@ -174,6 +176,14 @@ class TaskRunner:
             # Set default problem types for general tasks if not specified
             if not hasattr(config.azr, 'problem_types') or not config.azr.problem_types:
                 config.azr.problem_types = ['general']
+        elif task_type == 'longtext_qa':
+            # For long-text QA tasks, use a different path structure
+            # Extract document name from long_text.path
+            doc_name = Path(config.azr.long_text.path).stem if hasattr(config.azr, 'long_text') and config.azr.long_text.path else 'longtext'
+            config.trainer.default_local_dir = (Path(config.trainer.default_local_dir) / doc_name / config.actor_rollout_ref.model.path.split('/')[-1] / config.reward_fn.extraction_type).as_posix()
+            # Set default problem types for longtext_qa tasks if not specified
+            if not hasattr(config.azr, 'problem_types') or not config.azr.problem_types:
+                config.azr.problem_types = ['longtext_qa']
         else:
             # Original path structure for code tasks
             config.trainer.default_local_dir = (Path(config.trainer.default_local_dir) / config.data.train_files.split('/')[-1].split('.')[0] / config.actor_rollout_ref.model.path.split('/')[-1] / config.reward_fn.extraction_type).as_posix()
@@ -300,6 +310,31 @@ class TaskRunner:
                 api_keys=api_keys,  # Pass the loaded API keys
                 # maybe judge_with_actor as well?
             )
+        elif task_type == 'longtext_qa':
+            # Use LongTextQARewardManager for long-text continuous learning
+            print("[INFO] Initializing LongTextQARewardManager...")
+            reward_fn = LongTextQARewardManager(
+                tokenizer=tokenizer,
+                num_examine=0,
+                split='train',
+                reward_fn_extraction_type=config.reward_fn.extraction_type,
+                splitter=config.reward_fn.splitter,
+                output_path=config.trainer.default_local_dir,
+                generation_reward_config=config.azr.reward.generation_reward_config,
+                eval_reward_config=getattr(config.azr.reward, 'eval_reward_config', {}),
+                model_name=getattr(config.reward_fn, 'llm_model_name', 'meta/llama-3.1-405b-instruct'),
+                max_prompt_length=config.data.max_prompt_length,
+                temperature=getattr(config.reward_fn, 'temperature', 0.7),
+                max_tokens=getattr(config.reward_fn, 'max_tokens', 1000),
+                top_p=getattr(config.reward_fn, 'top_p', 0.95),
+                stream=getattr(config.reward_fn, 'stream', True),
+                judge_with_actor=getattr(config.reward_fn, 'judge_with_actor', False),
+                train_judge=getattr(config.azr, 'train_judge', False),
+            )
+            
+            # No separate validation reward function for longtext (reuse training one)
+            val_reward_fn = None
+            print("[INFO] LongTextQARewardManager initialized successfully")
         else:
             reward_fn = CodeIORewardManager(
                 tokenizer=tokenizer,
@@ -342,6 +377,11 @@ class TaskRunner:
                 'generalio', config.azr.pred_data_mix_strategy,
                 config.azr.data_selection_strategy.get('valid_question_filter', 'all'),
             ]
+        elif task_type == 'longtext_qa':
+            wandb_tags = [
+                'longtext_qa', config.azr.pred_data_mix_strategy,
+                config.azr.long_text.chunk_sampling_strategy,
+            ]
         else:
             wandb_tags = [
                 'codeio', config.azr.pred_data_mix_strategy, 'executor-' + config.azr.executor,
@@ -365,6 +405,25 @@ class TaskRunner:
                 val_reward_fn=None,  # No standard validation for general tasks
                 benchmark_reward_fn=val_reward_fn,  # Use benchmark evaluation instead
             )
+        elif task_type == 'longtext_qa':
+            # Create LongTextQA trainer
+            print("[INFO] Initializing LongTextQARayPPOTrainer...")
+            long_text_path = config.azr.long_text.path
+            if not long_text_path:
+                raise ValueError("azr.long_text.path must be specified in config for longtext_qa task")
+            
+            trainer = LongTextQARayPPOTrainer(
+                long_text_path=long_text_path,
+                past_epoch_window=config.azr.past_epoch_window,
+                config=config,
+                tokenizer=tokenizer,
+                role_worker_mapping=role_worker_mapping,
+                resource_pool_manager=resource_pool_manager,
+                ray_worker_group_cls=ray_worker_group_cls,
+                reward_fn=reward_fn,
+                val_reward_fn=val_reward_fn,
+            )
+            print("[INFO] LongTextQARayPPOTrainer initialized successfully")
         else:
             trainer = CodeIORayPPOTrainer(
                 past_epoch_window=config.azr.past_epoch_window,

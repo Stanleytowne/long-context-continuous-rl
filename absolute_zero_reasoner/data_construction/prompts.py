@@ -583,3 +583,258 @@ def get_code_problem_predictor_prompt(problem_type: str, snippet: str, input_arg
         return code_error_predictor_prompt.format(snippet=snippet, input_args=input_args)
     else:
         raise ValueError(f"Invalid problem type: {problem_type}")
+
+
+# ============================================================================
+# Long-Text Continuous Learning Prompts
+# ============================================================================
+
+longtext_proposer_prompt = """
+## Task: Generate a High-Quality Question-Answer Pair from Text
+
+You will be given a text segment. Your task is to create a question-answer pair that:
+1. **Requires specific knowledge from the text** to answer correctly
+2. Tests **deep understanding**, not just surface-level recall
+3. Has a **clear, verifiable answer** based on the text
+
+### Instructions:
+
+**Think step-by-step:**
+1. Read and understand the text carefully
+2. Identify key concepts, relationships, or facts that require reasoning
+3. Formulate a question that tests understanding of these elements
+4. Provide a complete, accurate answer based on the text
+
+**Question Requirements:**
+- Must require the text to answer (not answerable from general knowledge)
+- Should test comprehension, reasoning, or synthesis
+- Be specific and unambiguous
+- Avoid simple yes/no questions unless they require deep reasoning
+
+**Answer Requirements:**
+- Must be accurate and complete
+- Should be detailed enough to demonstrate understanding
+- Include reasoning or explanation when appropriate
+- Be self-contained (understandable without referring back to text)
+
+### Output Format:
+Wrap your question in `<question></question>` tags.
+Wrap your answer in `<answer></answer>` tags.
+
+### Example Output:
+```
+<question>
+Based on the text, what are the three main factors that contributed to the system's improved performance, and how do they interact?
+</question>
+
+<answer>
+The three main factors are: (1) efficient memory management, (2) parallel processing, and (3) optimized algorithms. They interact synergistically: efficient memory management enables parallel processing by reducing contention, which in turn allows optimized algorithms to execute faster across multiple cores.
+</answer>
+```
+
+### Text Segment:
+{text_segment}
+
+Now generate your question-answer pair:
+"""
+
+longtext_proposer_with_reference_prompt = """
+## Task: Generate a High-Quality Question-Answer Pair from Text (with Reference Examples)
+
+You will be given a text segment and some reference question-answer pairs. Your task is to create a **NEW** question-answer pair that:
+1. **Requires specific knowledge from the text** to answer correctly
+2. Tests **deep understanding**, similar to or more challenging than the references
+3. Has a **clear, verifiable answer** based on the text
+4. Is **different** from the reference examples in content and style
+
+### Instructions:
+
+**Think step-by-step:**
+1. Review the reference QA pairs to understand the expected quality and difficulty
+2. Read the text segment carefully
+3. Identify aspects NOT covered by the references
+4. Create a question that tests understanding in a new way
+5. Provide a complete, accurate answer
+
+**Question Requirements:**
+- Must require the text to answer (not answerable from general knowledge)
+- Should be at least as challenging as the reference examples
+- Be different from reference questions in topic and approach
+- Test comprehension, reasoning, or synthesis
+
+**Answer Requirements:**
+- Must be accurate and based on the text
+- Should be detailed and well-reasoned
+- Include explanations or justifications
+- Be self-contained
+
+### Output Format:
+Wrap your question in `<question></question>` tags.
+Wrap your answer in `<answer></answer>` tags.
+
+### Reference Question-Answer Pairs:
+{reference_qa_pairs}
+
+### Text Segment:
+{text_segment}
+
+Now generate your NEW question-answer pair (different from the references):
+"""
+
+longtext_solver_prompt = """
+## Task: Answer the Following Question
+
+You will be given a question. Please provide a complete, accurate, and well-reasoned answer.
+
+### Instructions:
+- Think step-by-step before answering
+- Provide a clear, structured response
+- Include reasoning or explanation where appropriate
+- Be comprehensive but concise
+
+### Output Format:
+Wrap your answer in `<answer></answer>` tags.
+
+### Question:
+{question}
+
+### Your Answer:
+"""
+
+longtext_judge_prompt = """
+## Task: Evaluate the Quality of an Answer
+
+You will be given a question, a ground truth answer, and a generated answer. Your task is to evaluate how well the generated answer matches the ground truth.
+
+### Evaluation Criteria:
+
+1. **Correctness** (40%): Does the generated answer contain correct information?
+2. **Completeness** (30%): Does it cover all key points from the ground truth?
+3. **Clarity** (20%): Is the answer clear and well-structured?
+4. **Reasoning** (10%): Does it show appropriate reasoning?
+
+### Scoring Guidelines:
+- **9-10**: Excellent - Correct, complete, clear, with good reasoning
+- **7-8**: Good - Mostly correct and complete, minor issues
+- **5-6**: Adequate - Partially correct but missing important points
+- **3-4**: Poor - Significant errors or omissions
+- **1-2**: Very Poor - Mostly incorrect or irrelevant
+
+### Question:
+{question}
+
+### Ground Truth Answer:
+{ground_truth}
+
+### Generated Answer:
+{generated_answer}
+
+### Your Evaluation:
+First, provide your analysis in `<think></think>` tags.
+Then, provide a score (1-10) in `<score></score>` tags.
+
+Example:
+```
+<think>
+The generated answer correctly identifies the main concept and provides accurate details. However, it misses one key point about the interaction mechanism mentioned in the ground truth. The explanation is clear and well-structured.
+</think>
+
+<score>7</score>
+```
+
+Now evaluate:
+"""
+
+
+def get_longtext_proposer_prompt(text_segment: str) -> str:
+    """
+    Generate proposer prompt for creating QA pairs from text.
+    
+    Args:
+        text_segment: The text segment to generate questions from
+        
+    Returns:
+        Formatted prompt string
+    """
+    return longtext_proposer_prompt.format(text_segment=text_segment)
+
+
+def get_longtext_proposer_with_reference_prompt(
+    text_segment: str,
+    reference_qa_pairs: List[Dict[str, str]],
+) -> str:
+    """
+    Generate proposer prompt with reference QA pairs for curriculum learning.
+    
+    Args:
+        text_segment: The text segment to generate questions from
+        reference_qa_pairs: List of reference QA pair dictionaries
+        
+    Returns:
+        Formatted prompt string
+    """
+    # Format reference QA pairs
+    reference_string = ""
+    for i, qa_pair in enumerate(reference_qa_pairs, 1):
+        question = qa_pair.get('question', '')
+        answer = qa_pair.get('answer', '')
+        reference_string += f"\n**Reference {i}:**\n"
+        reference_string += f"<question>{question}</question>\n"
+        reference_string += f"<answer>{answer}</answer>\n"
+    
+    return longtext_proposer_with_reference_prompt.format(
+        text_segment=text_segment,
+        reference_qa_pairs=reference_string
+    )
+
+
+def get_longtext_solver_prompt(question: str) -> str:
+    """
+    Generate solver prompt for answering questions without seeing the text.
+    
+    Args:
+        question: The question to answer
+        
+    Returns:
+        Formatted prompt string
+    """
+    return longtext_solver_prompt.format(question=question)
+
+
+def get_longtext_judge_prompt(
+    question: str,
+    ground_truth: str,
+    generated_answer: str,
+    prompt_manager=None,
+) -> str:
+    """
+    Generate judge prompt for evaluating answer quality.
+    
+    Args:
+        question: The original question
+        ground_truth: The ground truth answer
+        generated_answer: The answer to evaluate
+        prompt_manager: Optional prompt manager for dynamic prompts
+        
+    Returns:
+        Formatted prompt string
+    """
+    if prompt_manager:
+        # Use prompt manager if available
+        judge_template = prompt_manager.get_judge_instruction(prompt_type="together")
+        try:
+            return judge_template.format(
+                question=question,
+                ground_truth=ground_truth,
+                generated_answer=generated_answer
+            )
+        except (KeyError, ValueError):
+            # Fallback if template formatting fails
+            pass
+    
+    # Use default prompt
+    return longtext_judge_prompt.format(
+        question=question,
+        ground_truth=ground_truth,
+        generated_answer=generated_answer
+    )
